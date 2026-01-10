@@ -13,52 +13,98 @@ function generateBookingId() {
 
 
 const bookingSchema = new mongoose.Schema({
-  bookingId: { type: String, 
-    default: generateBookingId 
+  bookingId: { 
+    type: String, 
+    default: generateBookingId,
+    unique: true
   }, // Set default value to the function generateBookingId 
   ownerName: { 
     type: String, 
-    required: true 
+    required: true,
+    trim: true,
+    minlength: 2,
+    maxlength: 100
   },
   email: { 
     type: String, 
-    required: true 
+    required: true,
+    lowercase: true,
+    trim: true,
+    validate: {
+      validator: function(v) {
+        return /^\S+@\S+\.\S+$/.test(v);
+      },
+      message: props => `${props.value} is not a valid email!`
+    }
   },
   phone: { 
     type: String, 
-    required: true 
+    required: true,
+    trim: true,
+    validate: {
+      validator: function(v) {
+        return /^[0-9+\-\s()]+$/.test(v) && v.length >= 10 && v.length <= 15;
+      },
+      message: props => `${props.value} is not a valid phone number!`
+    }
   },
   specialNotes: { 
-    type: String 
+    type: String,
+    trim: true,
+    maxlength: 500
   },
   status: { 
     type: String, 
-    default: 'pending' // Set default value to 'pending'
+    default: 'pending',
+    enum: ['pending', 'accepted', 'in_progress', 'completed', 'cancelled']
   }, 
   mechanic: { 
-    type: String },
-  location: { type: String, 
-    required: true 
+    type: String,
+    trim: true,
+    maxlength: 100
+  },
+  location: { 
+    type: String, 
+    required: true,
+    trim: true,
+    minlength: 5,
+    maxlength: 100
   },
   serviceType: { 
     type: String, 
-    required: true 
+    required: true,
+    trim: true,
+    minlength: 2,
+    maxlength: 50
   },
   vehicleModel: { 
     type: String, 
-    required: true 
+    required: true,
+    trim: true,
+    minlength: 2,
+    maxlength: 50
   },
   vehicleNumber: { 
     type: String, 
-    required: true 
+    required: true,
+    trim: true,
+    minlength: 2,
+    maxlength: 20
   },
   date: { 
     type: Date, 
-    required: true 
+    required: true,
+    min: Date.now
   },
   time: { 
     type: String, 
-    required: true 
+    required: true,
+    validate: {
+      validator: function(v) {
+        return /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/.test(v);
+      },
+      message: props => `${props.value} is not a valid time format (HH:MM)!`
+    }
   },
 });
 

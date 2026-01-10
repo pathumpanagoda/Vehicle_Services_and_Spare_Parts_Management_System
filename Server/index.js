@@ -1,4 +1,3 @@
-const port = 4000;
 const express = require("express");
 const app = express();
 const mongoose = require("mongoose");
@@ -6,18 +5,146 @@ const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const path = require("path");
 const cors = require("cors");
+const helmet = require("helmet");
 const { log } = require("console");
+const Joi = require("joi");
+
+// Trust reverse proxy (Render/Heroku/NGINX) so req.secure & x-forwarded-proto work
+app.set('trust proxy', 1);
+
+// Remove Express fingerprinting
+app.disable('x-powered-by');
+
+// Helmet baseline (no CSP here — handled by another member)
+app.use(helmet({
+  frameguard: { action: 'deny' },   // X-Frame-Options: DENY
+  hidePoweredBy: true,              // X-Powered-By removed
+  noSniff: true,                    // X-Content-Type-Options: nosniff
+  referrerPolicy: { policy: 'no-referrer' } // optional but safe default
+}));
 const Product = require("./models/OnlineShopModels/Product");
 const Users = require("./models/OnlineShopModels/Users");
 const Order = require("./models/OnlineShopModels/Order");
 const Admins = require("./models/OnlineShopModels/Admin")
 var nodemailer = require('nodemailer');
 
-app.use(express.json());
-app.use(cors());
+// Validation Schemas
+const userSchema = Joi.object({
+  name: Joi.string().min(2).max(50).trim().required(),
+  email: Joi.string().email().lowercase().trim().required(),
+  password: Joi.string().min(8).max(128).required()
+});
 
-// Database Connection With MongoDB
-mongoose.connect("mongodb+srv://vehicleitp:16873Myno@test.fw5mj0t.mongodb.net/itpdb");
+const loginSchema = Joi.object({
+  email: Joi.string().email().lowercase().trim().required(),
+  password: Joi.string().required()
+});
+
+const productSchema = Joi.object({
+  name: Joi.string().min(2).max(100).trim().required(),
+  category: Joi.string().min(2).max(50).trim().required(),
+  brand: Joi.string().min(2).max(50).trim().required(),
+  image: Joi.string().uri().required(),
+  new_price: Joi.number().positive().required(),
+  old_price: Joi.number().positive().required(),
+  description: Joi.string().max(500).trim().required(),
+  quantity: Joi.number().integer().min(0).required()
+});
+
+const orderSchema = Joi.object({
+  fullName: Joi.string().min(2).max(100).trim().required(),
+  email: Joi.string().email().lowercase().trim().required(),
+  address: Joi.string().min(10).max(200).trim().required(),
+  contact: Joi.string().pattern(/^[0-9+\-\s()]+$/).min(10).max(15).required(),
+  paymentMethod: Joi.string().valid('cash', 'card', 'online').required(),
+  items: Joi.array().items(Joi.object()).min(1).required(),
+  totalAmount: Joi.number().positive().required()
+});
+
+const bookingSchema = Joi.object({
+  ownerName: Joi.string().min(2).max(100).trim().required(),
+  email: Joi.string().email().lowercase().trim().required(),
+  phone: Joi.string().pattern(/^[0-9+\-\s()]+$/).min(10).max(15).required(),
+  specialNotes: Joi.string().max(500).trim().allow(''),
+  location: Joi.string().min(5).max(100).trim().required(),
+  serviceType: Joi.string().min(2).max(50).trim().required(),
+  vehicleModel: Joi.string().min(2).max(50).trim().required(),
+  vehicleNumber: Joi.string().min(2).max(20).trim().required(),
+  date: Joi.date().min('now').required(),
+  time: Joi.string().pattern(/^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/).required()
+});
+
+const serviceSchema = Joi.object({
+  serviceTitle: Joi.string().min(2).max(100).trim().required(),
+  details: Joi.string().max(500).trim().allow(''),
+  estimatedHour: Joi.string().min(1).max(20).trim().required(),
+  image: Joi.string().uri().required()
+});
+
+const customerSchema = Joi.object({
+  customerID: Joi.string().min(2).max(20).trim().required(),
+  name: Joi.string().min(2).max(100).trim().required(),
+  NIC: Joi.string().pattern(/^[0-9]{9}[vVxX]|[0-9]{12}$/).required(),
+  address: Joi.string().min(10).max(200).trim().required(),
+  contactno: Joi.string().pattern(/^[0-9+\-\s()]+$/).min(10).max(15).required(),
+  email: Joi.string().email().lowercase().trim().required(),
+  vType: Joi.string().min(2).max(20).trim().required(),
+  vName: Joi.string().min(2).max(50).trim().required(),
+  Regno: Joi.string().min(2).max(20).trim().required(),
+  vColor: Joi.string().min(2).max(20).trim().required(),
+  vFuel: Joi.string().min(2).max(20).trim().required()
+});
+
+const issueSchema = Joi.object({
+  cid: Joi.string().min(2).max(20).trim().required(),
+  Cname: Joi.string().min(2).max(100).trim().required(),
+  Cnic: Joi.string().pattern(/^[0-9]{9}[vVxX]|[0-9]{12}$/).required(),
+  Ccontact: Joi.string().pattern(/^[0-9+\-\s()]+$/).min(10).max(15).required(),
+  Clocation: Joi.string().min(5).max(100).trim().required(),
+  Cstatus: Joi.string().valid('pending', 'in_progress', 'resolved', 'closed').required()
+});
+
+// Strict CORS with allow-list
+const allowed = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173,http://localhost:3000,https://vehicle-sever.onrender.com')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+const corsOptions = {
+  origin(origin, cb) {
+    // allow same-origin / non-browser clients without Origin
+    if (!origin) return cb(null, true);
+    if (allowed.includes(origin)) return cb(null, true);
+    return cb(new Error('CORS blocked: origin not allowed'), false);
+  },
+  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization','X-Requested-With','auth-token'],
+  // Only enable credentials if the app actually uses cookies across origins.
+  // credentials: true,
+  optionsSuccessStatus: 204
+};
+
+app.use(express.json());
+app.use(cors(corsOptions));
+
+// HSTS (production + HTTPS only)
+const isProd = process.env.NODE_ENV === 'production';
+
+if (isProd) {
+  app.use((req, res, next) => {
+    const https = req.secure || req.headers['x-forwarded-proto'] === 'https';
+    if (https) {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
+    next();
+  });
+}
+
+// MongoDB Connection - Mongo uri exposure vulnerability fixed by Kasundi
+const mongoURI = process.env.MONGO_URI || "mongodb://localhost:27017/vehicle_services";
+mongoose.connect(mongoURI)
+.then(() => console.log("MongoDB Connected"))
+.catch((err) => console.error("MongoDB Connection Error:", err));
 
 //API Creation
 
@@ -34,7 +161,27 @@ const storage = multer.diskStorage({
     }
 })
 
-const upload = multer({storage:storage})
+const upload = multer({
+    storage: storage,
+    limits: { 
+        fileSize: 2 * 1024 * 1024 // 2MB limit
+    },
+    fileFilter: (req, file, cb) => {
+        const allowedMimes = ['image/jpeg', 'image/jpg', 'image/png'];
+        const allowedExts = ['.jpg', '.jpeg', '.png'];
+        
+        if (!allowedMimes.includes(file.mimetype)) {
+            return cb(new Error('Invalid file type. Only JPEG and PNG images are allowed.'), false);
+        }
+        
+        const ext = path.extname(file.originalname).toLowerCase();
+        if (!allowedExts.includes(ext)) {
+            return cb(new Error('Invalid file extension. Only .jpg, .jpeg, and .png files are allowed.'), false);
+        }
+        
+        cb(null, true);
+    }
+})
 
 //Creating upload endpoint for images
 app.use('/images',express.static('upload/images'))
@@ -46,58 +193,14 @@ app.post("/upload",upload.single('product'),(req,res)=>{
     })
 })
 
-//Schema for Creating Products
-
-/*const Product = mongoose.model("Product",{
-    id:{
-        type: Number,
-        required:true,
-    },
-    name:{
-        type:String,
-        required:true,
-
-    },
-    category:{
-        type:String,
-        required:true,
-    },
-    brand:{
-        type:String,
-        required:true,
-    },
-    new_price:{
-        type:Number,
-        required:true,
-    },
-    old_price:{
-        type:Number,
-        required:true,
-    },
-    description:{
-        type:String,
-        required:true,
-    },
-    quantity:{
-        type:Number,
-        required:true,
-    },
-    image:{
-        type:String,
-        required:true,
-    },
-    date:{
-        type:Date,
-        default:Date.now,
-    },
-    available:{
-        type:Boolean,
-        default:true,
-    }
-})*/
-
 app.post('/addproduct', async (req,res)=>{
     try {
+        // Validate input
+        const { error, value } = productSchema.validate(req.body, { allowUnknown: false });
+        if (error) {
+            return res.status(400).json({ success: false, error: error.details[0].message });
+        }
+
         const products = await Product.find({});
         let id = 1;
 
@@ -108,14 +211,14 @@ app.post('/addproduct', async (req,res)=>{
 
         const product = new Product({
             id: id,
-            name: req.body.name,
-            category: req.body.category,
-            brand: req.body.brand,
-            image: req.body.image,
-            new_price: req.body.new_price,
-            old_price: req.body.old_price,
-            description: req.body.description,
-            quantity: Number(req.body.quantity),
+            name: value.name,
+            category: value.category,
+            brand: value.brand,
+            image: value.image,
+            new_price: value.new_price,
+            old_price: value.old_price,
+            description: value.description,
+            quantity: value.quantity,
         });
 
         console.log(product);
@@ -123,7 +226,7 @@ app.post('/addproduct', async (req,res)=>{
         console.log("Saved");
         res.json({
             success: true,
-            name: req.body.name,
+            name: value.name,
         });
     } catch (error) {
         console.error("Error while adding product:", error);
@@ -135,12 +238,27 @@ app.post('/addproduct', async (req,res)=>{
 // Creating API for deleting Product
 
 app.post('/removeproduct',async (req,res)=>{
-    await Product.findOneAndDelete({id:req.body.id});
-    console.log("Removed");
-    res.json({
-        success:true,
-        name:req.body.name,
-    })
+    try {
+        // Validate input
+        const { error, value } = Joi.object({
+            id: Joi.number().integer().positive().required(),
+            name: Joi.string().min(1).max(100).trim().required()
+        }).validate(req.body, { allowUnknown: false });
+        
+        if (error) {
+            return res.status(400).json({ success: false, error: error.details[0].message });
+        }
+
+        await Product.findOneAndDelete({id: value.id});
+        console.log("Removed");
+        res.json({
+            success:true,
+            name: value.name,
+        });
+    } catch (error) {
+        console.error("Error while removing product:", error);
+        res.status(500).json({ success: false, error: "Internal server error" });
+    }
 })
 
 // Creating API for getting all products
@@ -151,35 +269,40 @@ app.get('/allproducts',async (req, res)=>{
     res.send(products);
 })
 
+const port = process.env.PORT || 5000;
+
 app.listen(port,(error)=>{
     if(!error){
         console.log("Server Running on Port " + port)
     }else{
-        console.log("Error : " + errror)
+        console.log("Error : " + error)
     }
 })
 
 // Creating API for update product
 app.put('/updateproduct/:id', async (req, res) => {
     try {
-        const productId = req.params.id;
+        // Validate productId
+        const { error: idError, value: productId } = Joi.number().integer().positive().required().validate(req.params.id);
+        if (idError) {
+            return res.status(400).json({ success: false, error: 'Invalid product ID' });
+        }
 
-        const product = await Product.findOne({ id: productId });
+        // Validate input data
+        const { error, value } = productSchema.validate(req.body, { allowUnknown: false });
+        if (error) {
+            return res.status(400).json({ success: false, error: error.details[0].message });
+        }
+
+        const product = await Product.findOneAndUpdate(
+            { id: productId }, 
+            value, 
+            { new: true, runValidators: true }
+        );
 
         if (!product) {
             return res.status(404).json({ success: false, error: 'Product not found' });
         }
-
-        product.name = req.body.name || product.name;
-        product.category = req.body.category || product.category;
-        product.brand = req.body.brand || product.brand;
-        product.image = req.body.image || product.image;
-        product.new_price = req.body.new_price || product.new_price;
-        product.old_price = req.body.old_price || product.old_price;
-        product.description = req.body.description || product.description;
-        product.quantity = req.body.quantity || product.quantity;
-
-        await product.save();
 
         console.log("Updated Product:", product);
         res.json({ success: true, product });
@@ -244,54 +367,45 @@ app.get('/processingOrdersCount', async (req, res) => {
     }
 });
 
-/*const Users = mongoose.model('Users',{
-    name:{
-        type:String,
-    },
-    email:{
-        type:String,
-        unique:true,
-    },
-    password:{
-        type:String,
-    },
-    cartData:{
-        type:Object,   
-    },
-    date:{
-        type:Date,
-        default:Date.now,
-    }
-})*/
-
 app.post('/signup',async (req,res) =>{
-
-    let check = await Users.findOne({email:req.body.email});
-    if(check){
-        return res.status(400).json({success:false,errors:"eixsting user found with same email address"})
-
-    }
-    let cart = {};
-    for (let i = 0; i < 300; i++){
-        cart[i]=0;
-    }
-    const user = new Users({
-        name:req.body.name,
-        email:req.body.email,
-        password:req.body.password,
-        cartData:cart,
-    })
-
-    await user.save();
-
-    const data ={
-        user:{
-            id:user.id
+    try {
+        // Validate input
+        const { error, value } = userSchema.validate(req.body, { allowUnknown: false });
+        if (error) {
+            return res.status(400).json({success:false,errors: error.details[0].message});
         }
-    }
 
-    const token = jwt.sign(data, 'secret_ecom');
-    res.json({success:true,token})
+        let check = await Users.findOne({email: value.email});
+        if(check){
+            return res.status(400).json({success:false,errors:"existing user found with same email address"});
+        }
+        
+        let cart = {};
+        for (let i = 0; i < 300; i++){
+            cart[i]=0;
+        }
+        
+        const user = new Users({
+            name: value.name,
+            email: value.email,
+            password: value.password,
+            cartData: cart,
+        });
+
+        await user.save();
+
+        const data = {
+            user: {
+                id: user.id
+            }
+        };
+
+        const token = jwt.sign(data, process.env.JWT_SECRET || "default_jwt_secret");
+        res.json({success:true,token});
+    } catch (error) {
+        console.error("Error during signup:", error);
+        res.status(500).json({success:false,errors:"Internal server error"});
+    }
 })
 
 
@@ -337,49 +451,67 @@ app.post('/adminsignup', async (req, res) => {
 });
 
 app.post('/login', async (req,res) => {
-    let user = await Users.findOne({email:req.body.email});
-    if(user){
-        const passCompare = req.body.password === user.password;
-        if(passCompare){
-            const data = {
-                user:{
-                    id: user.id
+    try {
+        // Validate input
+        const { error, value } = loginSchema.validate(req.body, { allowUnknown: false });
+        if (error) {
+            return res.status(400).json({success:false,errors: error.details[0].message});
+        }
+
+        let user = await Users.findOne({email: value.email});
+        if(user){
+            const passCompare = value.password === user.password;
+            if(passCompare){
+                const data = {
+                    user:{
+                        id: user.id
+                    }
                 }
+                const token = jwt.sign(data, process.env.JWT_SECRET || "default_jwt_secret");
+                res.json({success:true,token});
+            } else {
+                res.json({success:false,errors:"Invalid credentials"});
             }
-            const token = jwt.sign(data, 'secret_ecom');
-            res.json({success:true,token});
+        } else {
+            res.json({success:false,errors:"Invalid credentials"});
         }
-        else{
-            res.json({success:false,errors:"wrong Password"});
-        }
-    }
-    else{
-        res.json({success:false,errors:"wrong Email Id"})
+    } catch (error) {
+        console.error("Error during login:", error);
+        res.status(500).json({success:false,errors:"Internal server error"});
     }
 })
 
 app.post('/adminlogin', async (req,res) => {
-    let Admin = await Admins.findOne({email:req.body.email});
-    if(Admin){
-        const passCompare = req.body.password === Admin.password;
-        if(passCompare){
-            const data = {
-                Admin: {
-                    id: Admin._id,
-                    name: Admin.name,
-                    email: Admin.email,
-                    role: Admin.role,
-                }
-            };
-            const token = jwt.sign(data, 'secret_ecom');
-            res.json({success:true,token});
+    try {
+        // Validate input
+        const { error, value } = loginSchema.validate(req.body, { allowUnknown: false });
+        if (error) {
+            return res.status(400).json({success:false,errors: error.details[0].message});
         }
-        else{
-            res.json({success:false,errors:"wrong Password"});
+
+        let Admin = await Admins.findOne({email: value.email});
+        if(Admin){
+            const passCompare = value.password === Admin.password;
+            if(passCompare){
+                const data = {
+                    Admin: {
+                        id: Admin._id,
+                        name: Admin.name,
+                        email: Admin.email,
+                        role: Admin.role,
+                    }
+                };
+                const token = jwt.sign(data, process.env.JWT_SECRET || "default_jwt_secret");
+                res.json({success:true,token});
+            } else {
+                res.json({success:false,errors:"Invalid credentials"});
+            }
+        } else {
+            res.json({success:false,errors:"Invalid credentials"});
         }
-    }
-    else{
-        res.json({success:false,errors:"wrong Email Id"})
+    } catch (error) {
+        console.error("Error during admin login:", error);
+        res.status(500).json({success:false,errors:"Internal server error"});
     }
 })
 
@@ -390,6 +522,7 @@ app.get('/newcollections', async (req,res) =>{
     res.send(newcollection);
 })
 
+// jwt secret exposure vulnerability was fixed by kasundi
 const fetchUser = async (req,res,next)=>{
     const token = req.header('auth-token');
     if(!token){
@@ -397,7 +530,7 @@ const fetchUser = async (req,res,next)=>{
     }
     else{
         try{
-            const data = jwt.verify(token, 'secret_ecom');
+            const data = jwt.verify(token,process.env.JWT_SECRET || "default_jwt_secret");
             req.user = data.user;
             next();
         } catch(error){
@@ -512,64 +645,25 @@ const clearCart = async (userId) => {
     }
 };
 
-
-// Import necessary modules
-/*const Order = mongoose.model("Order", {
-    orderId: {
-        type: String,
-        required: true,
-    },
-    fullName: {
-        type: String,
-        required: true,
-    },
-    email: {
-        type: String,
-        required: true,
-    },
-    address: {
-        type: String,
-        required: true,
-    },
-    contact: {
-        type: String,
-        required: true,
-    },
-    paymentMethod: {
-        type: String,
-        required: true,
-    },
-    items: {
-        type: Array,
-        required: true,
-    },
-    totalAmount: {
-        type: Number,
-        required: true,
-    },
-    orderDate: {
-        type: Date,
-        default: Date.now,
-    },
-    status: {
-        type: String,
-        default: "processing",
-    },
-});*/
-
+// email and password exposure vulnerability was fixed by kasundi
 // Create a transporter using SMTP transport
 const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
-        user: 'pprajeshvara@gmail.com',
-        pass: 'wjjm bzhn lxkp ennh'
+        user: process.env.EMAIL_ADD, 
+        pass: process.env.EMAIL_PW
     }
 });
 
 app.post('/checkout',fetchUser, async (req, res) => {
     try {
+        // Validate input
+        const { error, value } = orderSchema.validate(req.body, { allowUnknown: false });
+        if (error) {
+            return res.status(400).json({ success: false, error: error.details[0].message });
+        }
 
-        const { fullName, email, address, contact, paymentMethod, items, totalAmount } = req.body;
+        const { fullName, email, address, contact, paymentMethod, items, totalAmount } = value;
 
         const orderId = generateOrderId();
 
@@ -589,7 +683,7 @@ app.post('/checkout',fetchUser, async (req, res) => {
         const userId = req.user.id;
 
         await clearCart(userId);
-
+        
         const mailOptions = {
             from: 'pprajeshvara@gmail.com',
             to: email,
@@ -791,11 +885,14 @@ const Booking = require('./models/BookingModel');
 
 app.post('/addbooking', async (req, res) => {
     try {
-      // Extract form data from request body
-      const formData = req.body;
+      // Validate input
+      const { error, value } = bookingSchema.validate(req.body, { allowUnknown: false });
+      if (error) {
+        return res.status(400).json({ error: error.details[0].message });
+      }
   
       // Create a new booking instance
-      const newBooking = new Booking(formData);
+      const newBooking = new Booking(value);
   
       // Save the booking to the database
       await newBooking.save();
@@ -815,23 +912,32 @@ app.post('/addbooking', async (req, res) => {
 app.put('/updateBookingStatus2/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const { status } = req.body;
+        
+        // Validate status
+        const { error, value } = Joi.object({
+            status: Joi.string().valid('pending', 'accepted', 'in_progress', 'completed', 'cancelled').required()
+        }).validate(req.body, { allowUnknown: false });
+        
+        if (error) {
+            return res.status(400).json({ error: error.details[0].message });
+        }
 
         const updatedBooking = await Booking.findByIdAndUpdate(
             id,
-            { $set: { status } }, // Update status
-            { new: true }
+            { $set: { status: value.status } }, // Update status
+            { new: true, runValidators: true }
         );
+        
+        if (!updatedBooking) {
+            return res.status(404).json({ error: 'Booking not found' });
+        }
+        
         if (updatedBooking.status === 'accepted') {
             const { email } = updatedBooking;
             const subject = 'Booking Accepted';
             const text = 'We are excited to confirm your booking! Your service request has been accepted. We look forward to serving you on Booking Date at Booking Time. Should you have any questions, feel free to reach out. Thank you for choosing us.';
       
             await sendEmail(email, subject, text);
-          }
-
-        if (!updatedBooking) {
-            return res.status(404).json({ error: 'Booking not found' });
         }
 
         res.status(200).json({ message: 'Booking status updated successfully', updatedBooking });
@@ -846,10 +952,17 @@ app.put('/updateBookingStatus2/:id', async (req, res) => {
     app.put('/updateBookingDetails/:id', async (req, res) => {
         try {
           const { id } = req.params;
+          
+          // Validate input
+          const { error, value } = bookingSchema.validate(req.body, { allowUnknown: false });
+          if (error) {
+            return res.status(400).json({ error: error.details[0].message });
+          }
+          
           const updatedBooking = await Booking.findByIdAndUpdate(
             id,
-            req.body, // Update booking details
-            { new: true }
+            value, // Update booking details
+            { new: true, runValidators: true }
           );
     
         if (!updatedBooking) {
@@ -862,23 +975,20 @@ app.put('/updateBookingStatus2/:id', async (req, res) => {
         }
         }); 
     
-        //get all booking details
-        app.get('/allBookingRequest', async (req, res) => {
-            try {
-              const data = await Booking.find();
-              res.json(data);
-              console.log("All Booking Requests Fetched");
+    //get all booking details
+    app.get('/allBookingRequest', async (req, res) => {
+        try {
+            const data = await Booking.find();
+            res.json(data);
+            console.log("All Booking Requests Fetched");
+    
+        } catch (error) {
+            console.error(error);
+            res.status(500).json({ message: 'Server error' });
+        }
+        }
+    );  
         
-            } catch (error) {
-              console.error(error);
-              res.status(500).json({ message: 'Server error' });
-            }
-          }
-        );
-
-        
-        
-
     //pathum's Service Routes
 
 const Service = require('./models/ServiceModel');
@@ -886,18 +996,24 @@ const Service = require('./models/ServiceModel');
 // POST route for adding a new service
 app.post('/addservice', upload.single('image'), async (req, res) => {
     try {
+        // Validate input
+        const { error, value } = serviceSchema.validate(req.body, { allowUnknown: false });
+        if (error) {
+            return res.status(400).json({ error: error.details[0].message });
+        }
+
         // Create new service object
         const newService = new Service({
-            serviceTitle: req.body.serviceTitle,
-            estimatedHour: req.body.estimatedHour,
-            details: req.body.details,
-            imagePath: req.body.image, // Save image path
+            serviceTitle: value.serviceTitle,
+            estimatedHour: value.estimatedHour,
+            details: value.details,
+            imagePath: value.image, // Save image path
         });
         // Save the service to MongoDB
         await newService.save();
         res.json({
             success: true,
-            name: req.body.name,
+            name: value.serviceTitle,
         });
     } catch (error) {
         console.error('Error adding service:', error);
@@ -953,13 +1069,22 @@ app.delete('/deleteServices/:id', async (req, res) => {
 app.put('/updateservice/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const updatedService = req.body;
+        
+        // Validate input
+        const { error, value } = serviceSchema.validate(req.body, { allowUnknown: false });
+        if (error) {
+            return res.status(400).json({ error: error.details[0].message });
+        }
 
         // Find and update the service in the database
-        await Service.findByIdAndUpdate(id, updatedService);
+        const updatedService = await Service.findByIdAndUpdate(id, value, { new: true, runValidators: true });
+        
+        if (!updatedService) {
+            return res.status(404).json({ error: 'Service not found' });
+        }
+        
         console.log("Service updated");
-
-        res.status(200).json({ message: 'Service updated successfully' });
+        res.status(200).json({ message: 'Service updated successfully', service: updatedService });
     } catch (error) {
         console.error('Error updating Service:', error);
         res.status(500).json({ error: 'Server error' });
@@ -973,28 +1098,15 @@ const Admin = require("./models/OnlineShopModels/Admin");
   //Route for save new Issue
 app.post('/issues', async (request, response) => {
     try {
-        if (
-            !request.body.cid ||
-            !request.body.Cname ||
-            !request.body.Cnic ||
-            !request.body.Ccontact ||
-            !request.body.Clocation ||
-            !request.body.Cstatus
-        ) {
+        // Validate input
+        const { error, value } = issueSchema.validate(request.body, { allowUnknown: false });
+        if (error) {
             return response.status(400).send({
-                message: 'Send all required fields: cid, Cname, Cnic, Ccontact, Clocation, Cstatus',
+                message: error.details[0].message,
             });
         }
-        const newIssue = {
-            cid: request.body.cid,
-            Cname: request.body.Cname,
-            Cnic: request.body.Cnic,
-            Ccontact: request.body.Ccontact,
-            Clocation: request.body.Clocation,
-            Cstatus: request.body.Cstatus,
-        };
-        const issue = await Issue.create(newIssue);
 
+        const issue = await Issue.create(value);
         return response.status(201).send(issue);
     } catch (error) {
         console.log(error.message);
@@ -1032,35 +1144,28 @@ app.get('/issues/:id', async (request, response) => {
 //Route for update a Book
 app.put('/issues/:id', async (request, response) => {
     try {
-        if (
-            !request.body.cid ||
-            !request.body.Cname ||
-            !request.body.Cnic ||
-            !request.body.Ccontact ||
-            !request.body.Clocation ||
-            !request.body.Cstatus
-        ) {
+        // Validate input
+        const { error, value } = issueSchema.validate(request.body, { allowUnknown: false });
+        if (error) {
             return response.status(400).send({
-                message: 'Send all required fields: cid, Cname, Cnic, Ccontact, Clocation, Cstatus',
+                message: error.details[0].message,
             });
         }
 
         const { id } = request.params;
 
-        const result = await Issue.findByIdAndUpdate(id, request.body);
+        const result = await Issue.findByIdAndUpdate(id, value, { new: true, runValidators: true });
 
         if (!result) {
             return response.status(404).json({ message: 'Issue not found' });
         }
 
-        return response.status(200).json({ message: 'Issue update Successfully' });
+        return response.status(200).json({ message: 'Issue update Successfully', issue: result });
 
     } catch (error) {
         console.log(error.message);
         response.status(500).send({ message: error.message });
     }
-
-
 });
 
 //Route for Delete a issue 
@@ -1087,9 +1192,23 @@ app.delete('/issues/:id', async (request, response) => {
 const Customers = require("./models/customerModel");
 
 app.post("/customers/", (req, res) => {
-    Customers.create(req.body)
-        .then(() => res.json({ msg: "Customer added successfully" }))
-        .catch(() => res.status(400).json({ msg: "Custommer adding failed" }));
+    try {
+        // Validate input
+        const { error, value } = customerSchema.validate(req.body, { allowUnknown: false });
+        if (error) {
+            return res.status(400).json({ msg: error.details[0].message });
+        }
+
+        Customers.create(value)
+            .then(() => res.json({ msg: "Customer added successfully" }))
+            .catch((err) => {
+                console.error("Error creating customer:", err);
+                res.status(400).json({ msg: "Customer adding failed" });
+            });
+    } catch (error) {
+        console.error("Error validating customer data:", error);
+        res.status(500).json({ msg: "Internal server error" });
+    }
 });
 
 app.get("/customers/", (req, res) => {
@@ -1106,10 +1225,28 @@ app.get("/customers/:id", (req, res) => {
 });
 
 app.put("/customers/:id", (req, res) => {
-    Customers.findByIdAndUpdate(req.params.id, req.body)
-        .then(() => res.json({ msg: "Update successfully" }))
-        .catch(() => res.status(400).json({ msg: "Update fail" }))
-        ;
+    try {
+        // Validate input
+        const { error, value } = customerSchema.validate(req.body, { allowUnknown: false });
+        if (error) {
+            return res.status(400).json({ msg: error.details[0].message });
+        }
+
+        Customers.findByIdAndUpdate(req.params.id, value, { runValidators: true, new: true })
+            .then((updatedCustomer) => {
+                if (!updatedCustomer) {
+                    return res.status(404).json({ msg: "Customer not found" });
+                }
+                res.json({ msg: "Update successfully", customer: updatedCustomer });
+            })
+            .catch((err) => {
+                console.error("Error updating customer:", err);
+                res.status(400).json({ msg: "Update fail" });
+            });
+    } catch (error) {
+        console.error("Error validating customer data:", error);
+        res.status(500).json({ msg: "Internal server error" });
+    }
 });
 
 app.delete("/customers/:id", (req, res) => {
